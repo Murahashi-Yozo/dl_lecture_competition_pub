@@ -1,4 +1,28 @@
-# ===================================================
+# ドライブマウント
+from google.colab import drive
+drive.mount('/content/drive')
+%cd '/content/drive/MyDrive/Colab Notebooks/DL基礎/14 最終課題/VQA/data/'
+
+#ランタイムライブラリーにデータを移動、unzip
+#解凍用
+import zipfile
+
+extracted_folder = '/content/data/'
+
+zip_file_path = '/content/drive/MyDrive/Colab Notebooks/DL基礎/14 最終課題/VQA/data/train.zip'
+with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+  zip_ref.extractall(extracted_folder)
+
+#解凍用
+import zipfile
+
+extracted_folder = '/content/data/'
+
+zip_file_path = '/content/drive/MyDrive/Colab Notebooks/DL基礎/14 最終課題/VQA/data/valid.zip'
+with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+  zip_ref.extractall(extracted_folder)
+
+# 01.ライブラリーのインポート
 import re
 import random
 import time
@@ -12,7 +36,7 @@ import torch.nn as nn
 import torchvision
 from torchvision import transforms
 
-
+# 02.セットseed
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -22,7 +46,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-###=============================================
+# 03.テキスト前処理 ##=======================
 def process_text(text):
     # lowercase
     text = text.lower()
@@ -61,8 +85,7 @@ def process_text(text):
 
     return text
 
-
-# 1. データローダーの作成
+# 1. データローダーの作成 ==================
 class VQADataset(torch.utils.data.Dataset):
     def __init__(self, df_path, image_dir, transform=None, answer=True):
         self.transform = transform  # 画像の前処理
@@ -132,7 +155,10 @@ class VQADataset(torch.utils.data.Dataset):
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
         question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
+
+        # ====== 改善 その１ ================================================
+        # question_words = self.df["question"][idx].split(" ")
+        question_words = process_text(self.df["question"][idx]).split(" ")  #No1
         for word in question_words:
             try:
                 question[self.question2idx[word]] = 1  # one-hot表現に変換
@@ -151,9 +177,7 @@ class VQADataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.df)
 
-
-###=============================================
-# 2. 評価指標の実装
+# 2. 評価指標の実装 ==========================
 # 簡単にするならBCEを利用する
 def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
     total_acc = 0.
@@ -172,9 +196,7 @@ def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
 
     return total_acc / len(batch_pred)
 
-
-###=============================================
-# 3. モデルのの実装
+# 3. モデルの実装 ==========================
 # ResNetを利用できるようにしておく
 class BasicBlock(nn.Module):
     expansion = 1
@@ -204,7 +226,6 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
 
         return out
-
 
 class BottleneckBlock(nn.Module):
     expansion = 4
@@ -237,7 +258,6 @@ class BottleneckBlock(nn.Module):
         out = self.relu(out)
 
         return out
-
 
 class ResNet(nn.Module):
     def __init__(self, block, layers):
@@ -281,20 +301,21 @@ class ResNet(nn.Module):
 
         return x
 
-
 def ResNet18():
     return ResNet(BasicBlock, [2, 2, 2, 2])
-
 
 def ResNet50():
     return ResNet(BottleneckBlock, [3, 4, 6, 3])
 
-
+### ここが中心のモデル =============================
+#===== 改善その３ 埋め込み層とLSTM層の追加 =========
 class VQAModel(nn.Module):
     def __init__(self, vocab_size: int, n_answer: int):
         super().__init__()
-        self.resnet = ResNet18()
-        self.text_encoder = nn.Linear(vocab_size, 512)
+        #===== 改善その２ ResNet50を利用 ===========
+        self.resnet = ResNet50()     # ResNet18からResNet50に変更
+        self.embedding = nn.Embedding(vocab_size, 300)  # 埋め込み層（単語の分散表現）
+        self.lstm = nn.LSTM(input_size=300, hidden_size=512, num_layers=1, batch_first=True)
 
         self.fc = nn.Sequential(
             nn.Linear(1024, 512),
@@ -304,16 +325,16 @@ class VQAModel(nn.Module):
 
     def forward(self, image, question):
         image_feature = self.resnet(image)  # 画像の特徴量
-        question_feature = self.text_encoder(question)  # テキストの特徴量
+        question_embedded = self.embedding(question.long())  # 単語の埋め込み
+        _, (hn, _) = self.lstm(question_embedded)  # LSTMによる文脈特徴量の抽出
+        question_feature = hn[-1]  # 最後のLSTM層の出力を利用
 
         x = torch.cat([image_feature, question_feature], dim=1)
         x = self.fc(x)
 
         return x
 
-
-###=============================================
-# 4. 学習の実装
+# 4. 学習の実装 ======================================
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
 
@@ -361,7 +382,6 @@ def eval(model, dataloader, optimizer, criterion, device):
 
     return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
 
-
 ###=============================================
 def main():
     # deviceの設定
@@ -373,11 +393,21 @@ def main():
         transforms.Resize((224, 224)),
         transforms.ToTensor()
     ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
+
+    ###=============================================
+    Path = "/content/data/"
+    %cd '/content/drive/MyDrive/Colab Notebooks/DL基礎/14 最終課題/VQA/'
+
+    image_dir_train_path = Path + "train"     #imageだけランタイム
+    image_dir_valid_path = Path + "valid"     #imageだけランタイム
+
+    train_dataset = VQADataset(df_path="./data/train.json", image_dir=image_dir_train_path, transform=transform)
+    test_dataset = VQADataset(df_path="./data/valid.json", image_dir=image_dir_valid_path,  transform=transform, answer=False)
+
     test_dataset.update_dict(train_dataset)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    #=== 改善その３の実行時にMemoryError、batch_sizeを128から64に変更 ======================
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True) # batch_size
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
@@ -396,7 +426,7 @@ def main():
               f"train acc: {train_acc:.4f}\n"
               f"train simple acc: {train_simple_acc:.4f}")
 
-    ###=============================================
+###=============================================
     # 提出用ファイルの作成
     model.eval()
     submission = []
@@ -409,7 +439,7 @@ def main():
     submission = [train_dataset.idx2answer[id] for id in submission]
     submission = np.array(submission)
     torch.save(model.state_dict(), "model.pth")
-    np.save("submission.npy", submission)
+    np.save("Murahashi.npy", submission)
 
 if __name__ == "__main__":
     main()
